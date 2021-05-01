@@ -10,3 +10,5 @@ data/
 out/
 dist
 coverage
+.nyc_output/
+coverage-ts
