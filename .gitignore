@@ -8,3 +8,5 @@ config.json
 .vscode
 data/
 out/
+dist
+coverage

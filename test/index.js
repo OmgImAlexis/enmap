@@ -1,11 +1,11 @@
 /* global describe, test, beforeEach, afterEach, expect */
-const Enmap = require('../');
+const { EnhancedMap } = require('../dist');
 
 describe('Standard Enmaps', () => {
   let enmap;
 
   describe('Basic Enmap', () => {
-    enmap = new Enmap('::memory::');
+    enmap = new EnhancedMap('::memory::');
     test('inserts primitive values', () => {
       expect(enmap.set('simplevalue', 'this is a string')).not.toBe(null);
       expect(enmap.set('boolean', true)).not.toBe(null);
@@ -33,7 +33,7 @@ describe('Standard Enmaps', () => {
   });
 
   describe('Advanced Data Types', () => {
-    enmap = new Enmap('::memory::');
+    enmap = new EnhancedMap('::memory::');
 
     test('supports arrays', () => {
       expect(enmap.set('array', [1, 2, 3])).not.toBe(null);
@@ -103,7 +103,7 @@ describe('Standard Enmaps', () => {
 describe('Advanced Data Type Methods', () => {
   let enmap;
   beforeEach(() => {
-    enmap = new Enmap('::memory::');
+    enmap = new EnhancedMap('::memory::');
     enmap.set('obj1', {
       prop: 'prop',
       foo: 'bar',
@@ -154,7 +154,7 @@ describe('Basic Enmap Options', () => {
   });
 
   test('supports direct passing by reference (cloneLevel none)', () => {
-    enmap = new Enmap({ name: '::memory::', cloneLevel: 'none' });
+    enmap = new EnhancedMap({ name: '::memory::', cloneLevel: 'none' });
     enmap.set('foo', baseObj);
     enmap.set('foo', 'other', 'prop2');
     enmap.push('foo', 4, 'prop3');
@@ -164,7 +164,7 @@ describe('Basic Enmap Options', () => {
   });
 
   test('supports shallow clones', () => {
-    enmap = new Enmap({ name: '::memory::', cloneLevel: 'shallow' });
+    enmap = new EnhancedMap({ name: '::memory::', cloneLevel: 'shallow' });
     enmap.set('foo', baseObj);
     enmap.set('foo', 'other', 'prop2');
     enmap.push('foo', 4, 'prop3');
@@ -175,7 +175,7 @@ describe('Basic Enmap Options', () => {
   });
 
   test('supports deep clones', () => {
-    enmap = new Enmap({ name: '::memory::', cloneLevel: 'deep' });
+    enmap = new EnhancedMap({ name: '::memory::', cloneLevel: 'deep' });
     enmap.set('foo', baseObj);
     enmap.set('foo', 'other', 'prop2');
     enmap.push('foo', 4, 'prop3');
@@ -186,7 +186,7 @@ describe('Basic Enmap Options', () => {
   });
 
   test('supports deep ensure() merge', () => {
-    enmap = new Enmap({ name: '::memory::', ensureProps: true });
+    enmap = new EnhancedMap({ name: '::memory::', ensureProps: true });
     const defaultValue = {
       foo: 'bar',
       bar: { foo: 1 }
@@ -211,7 +211,7 @@ describe('Enmap Advanced Options', () => {
     enmap = null;
   });
   test('supports autoEnsure', () => {
-    enmap = new Enmap({ name: '::memory::', autoEnsure: defaultData });
+    enmap = new EnhancedMap({ name: '::memory::', autoEnsure: defaultData });
     expect(enmap.get('test')).toEqual(defaultData);
     expect(enmap.size).toBe(1);
     enmap.set('test', 'a', 'a');
@@ -227,7 +227,7 @@ describe('Enmap Advanced Options', () => {
   });
 
   test('supports serializers', () => {
-    enmap = new Enmap({
+    enmap = new EnhancedMap({
       name: '::memory::',
       serializer: (data, key) => ({
         ...data,
