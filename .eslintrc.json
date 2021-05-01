@@ -3,24 +3,17 @@
     "eslint:recommended",
     "plugin:react/recommended",
     "plugin:react-hooks/recommended",
-    "prettier",
-    "prettier/react"
+    "prettier"
   ],
   "env": {
     "node": true,
-    "es6": true,
-    "browser": true
+    "es6": true
   },
   "parserOptions": {
-    "ecmaFeatures": {
-      "jsx": true
-    },
     "ecmaVersion": 2020,
     "sourceType": "module"
   },
-  "plugins": ["react"],
   "rules": {
-    "react/prop-types": 0,
     "no-unused-vars": 1
   }
 }

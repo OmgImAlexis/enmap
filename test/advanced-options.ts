@@ -31,7 +31,7 @@ test.afterEach((t) => {
 test('supports autoEnsure', (t) => {
   t.context.enmap = new EnhancedMap({
     name: '::memory::',
-    autoEnsure: defaultData,
+    default: defaultData,
   });
   t.deepEqual(t.context.enmap.get('test'), defaultData);
   t.is(t.context.enmap.size, 1);

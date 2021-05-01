@@ -38,11 +38,7 @@ interface EnmapOptions<V> {
   fetchAll?: boolean;
   autoFetch?: boolean;
   dataDir?: string;
-  cloneLevel?: 'none' | 'shallow' | 'deep';
-  polling?: boolean;
-  pollingInterval?: number;
-  autoEnsure?: boolean;
-  ensureProps?: boolean;
+  default?: V;
   wal?: boolean;
   verbose?: (query: string) => void;
   /**
@@ -61,19 +57,16 @@ interface EnmapOptions<V> {
 
 /**
  * A enhanced Map structure with additional utility methods.
- * Can be made persistent
- * @extends {Map}
+ * Can be made persistent.
  */
 export class EnhancedMap<V> extends Map<string, V> {
-  private cloneLevel: string;
-  ensureProps: boolean;
   serializer: (data: V, key: string) => V;
   deserializer: (data: V, key: string) => V;
   name: string;
   changedCB: any;
   inMemory: boolean;
   verbose?: boolean;
-  autoEnsure?: boolean;
+  default: V | {};
   db?: SqliteDatabase;
   database?: SqliteDatabase;
   persistent: boolean;
@@ -83,6 +76,7 @@ export class EnhancedMap<V> extends Map<string, V> {
   defer: any;
   autoFetch?: boolean;
   dataDir?: string;
+  cloneLevel: string;
 
   /**
    * Initializes a new enhanced map with options.
@@ -101,18 +95,8 @@ export class EnhancedMap<V> extends Map<string, V> {
     }
     super();
 
-    // Validate options
-    if (
-      options.cloneLevel &&
-      !['none', 'shallow', 'deep'].includes(options.cloneLevel)
-    ) {
-      throw new EnhancedMapOptionsError(
-        'Unknown Clone Level. Options are none, shallow, deep. Default is deep.',
-      );
-    }
-
-    this.cloneLevel = options.cloneLevel ?? 'deep';
-    this.ensureProps = options.ensureProps ?? true;
+    this.default = options.default ?? {};
+    this.cloneLevel = 'deep';
     this.serializer = options.serializer ?? ((data: V) => data);
     this.deserializer = options.deserializer ?? ((data: V) => data);
     this.name = options.name ?? 'MemoryEnmap';
@@ -132,16 +116,13 @@ export class EnhancedMap<V> extends Map<string, V> {
 
     // Setup the sqlite db
     if (this.persistent) {
-      this.autoEnsure = options.autoEnsure ?? false;
       this.autoFetch = options.autoFetch ?? true;
       this.fetchAll = options.fetchAll ?? true;
       this.wal = options.wal ?? false;
 
       this.database = this.inMemory
-        ? new Database(':memory:', { verbose: this.verbose })
-        : new Database(`${this.dataDir!}${sep}enmap.sqlite`, {
-            verbose: this.verbose,
-          });
+        ? new Database(':memory:', this.verbose ? { verbose: console.log } : ({}))
+        : new Database(`${this.dataDir!}${sep}enmap.sqlite`, this.verbose ? { verbose: console.log } : ({}));
 
       this._validateName();
       this._init(this.database);
@@ -266,8 +247,8 @@ export class EnhancedMap<V> extends Map<string, V> {
     if (isNil(key)) return null;
     this._fetchCheck(key);
     key = key.toString();
-    if (this.autoEnsure && !this.has(key)) {
-      this._internalSet(key, this.autoEnsure);
+    if (this.default && !this.has(key)) {
+      this._internalSet(key, this.default);
     }
     const data = super.get(key);
     if (!isNil(path)) {
@@ -428,7 +409,7 @@ export class EnhancedMap<V> extends Map<string, V> {
    */
   close() {
     this._readyCheck();
-    return this.database.close();
+    return this.database?.close();
   }
 
   /**
@@ -482,10 +463,11 @@ export class EnhancedMap<V> extends Map<string, V> {
    * points.math("number", "modulo", 3); // 2
    * points.math("numberInObject", "+", 10, "sub.anInt");
    */
-  math(key: string, operation: MathOps, operand: number, path?: string) {
-    this._check(key, 'Number', path);
+  math(key: string, operation: MathOps, operand: number, path: keyof V) {
+    this._check(key, 'Number', path as string);
     const data = this.get(key, path);
-    return this.set(key, this._mathop(data, operation, operand), path);
+    const result = this._mathop(data, operation, operand);
+    return this.set(key, result, path);
   }
 
   /**
@@ -499,9 +481,8 @@ export class EnhancedMap<V> extends Map<string, V> {
    *
    * points.inc("number"); // 43
    * points.inc("numberInObject", "sub.anInt"); // {sub: { anInt: 6 }}
-   * @returns {EnhancedMap} The enmap.
    */
-  inc(key: string, path: string) {
+  inc(key: string, path: string): EnhancedMap<V>  {
     this._check(key, 'Number', path);
     if (isNil(path)) {
       let val = this.get(key);
@@ -516,8 +497,8 @@ export class EnhancedMap<V> extends Map<string, V> {
 
   /**
    * Decrements a key's value or property by 1. Value must be a number, or a path to a number.
-   * @param {string} key The enmap key where the value to decrement is stored.
-   * @param {string} path Optional. The property path to decrement, if the value is an object or array.
+   * @param key The enmap key where the value to decrement is stored.
+   * @param path The property path to decrement, if the value is an object or array.
    * @example
    * // Assuming
    * points.set("number", 42);
@@ -525,9 +506,8 @@ export class EnhancedMap<V> extends Map<string, V> {
    *
    * points.dec("number"); // 41
    * points.dec("numberInObject", "sub.anInt"); // {sub: { anInt: 4 }}
-   * @returns {EnhancedMap} The enmap.
    */
-  dec(key, path = null) {
+  dec(key: string, path?: string): EnhancedMap<V> {
     this._check(key, 'Number', path);
     if (isNil(path)) {
       let val = this.get(key);
@@ -538,64 +518,6 @@ export class EnhancedMap<V> extends Map<string, V> {
       _set(data, path, --propValue);
       return this._internalSet(key, data);
     }
-  }
-
-  /**
-   * Returns the key's value, or the default given, ensuring that the data is there.
-   * This is a shortcut to "if enmap doesn't have key, set it, then get it" which is a very common pattern.
-   * @param key Required. The key you want to make sure exists.
-   * @param {*} defaultValue Required. The value you want to save in the database and return as default.
-   * @param path If presents, ensures both the key exists as an object, and the full path exists.
-   * Can be a path with dot notation, such as "prop1.subprop2.subprop3"
-   * @example
-   * // Simply ensure the data exists (for using property methods):
-   * enmap.ensure("mykey", {some: "value", here: "as an example"});
-   * enmap.has("mykey"); // always returns true
-   * enmap.get("mykey", "here") // returns "as an example";
-   *
-   * // Get the default value back in a variable:
-   * const settings = mySettings.ensure("1234567890", defaultSettings);
-   * console.log(settings) // enmap's value for "1234567890" if it exists, otherwise the defaultSettings value.
-   * @return {*} The value from the database for the key, or the default value provided for a new key.
-   */
-  ensure(key: string, defaultValue, path?: string) {
-    this._readyCheck();
-    this._fetchCheck(key);
-    if (this.autoEnsure) {
-      // eslint-disable-next-line max-len
-      if (!isNil(defaultValue))
-        console.warn(
-          `WARNING: Saving "${key}" autoEnsure value was provided for this enmap but a default value has also been provided. The defaultValue will be ignored, autoEnsure value is used instead.`,
-        );
-      defaultValue = this.autoEnsure;
-    }
-    if (isNil(defaultValue))
-      throw new EnhancedMapArgumentError(
-        `No default value provided on ensure method for "${key}" in "${this.name}"`,
-      );
-    const clonedValue = this._clone(defaultValue);
-    if (!isNil(path)) {
-      if (this.ensureProps) this.ensure(key, {});
-      if (!this.has(key))
-        throw new EnhancedMapKeyError(
-          `Key "${key}" does not exist in "${this.name}" to ensure a property`,
-        );
-      if (this.has(key, path)) return this.get(key, path);
-      this.set(key, defaultValue, path);
-      return defaultValue;
-    }
-    if (this.ensureProps && isObject(this.get(key))) {
-      if (!isObject(clonedValue))
-        throw new EnhancedMapArgumentError(
-          `Default value for "${key}" in enmap "${this.name}" must be an object when merging with an object value.`,
-        );
-      const merged = merge(clonedValue, this.get(key));
-      this.set(key, merged);
-      return merged;
-    }
-    if (this.has(key)) return this.get(key);
-    this.set(key, clonedValue);
-    return clonedValue;
   }
 
   /**
@@ -662,7 +584,7 @@ export class EnhancedMap<V> extends Map<string, V> {
   /**
    * Deletes a key in the Enmap.
    * @param key Required. The key of the element to delete from The Enmap.
-   * @param path Optional. The name of the property to remove from the object.
+   * @param path The name of the property to remove from the object.
    * Can be a path with dot notation, such as "prop1.subprop2.subprop3"
    * @returns The enmap.
    */
@@ -706,7 +628,7 @@ export class EnhancedMap<V> extends Map<string, V> {
   deleteAll() {
     this._readyCheck();
     if (this.persistent) {
-      this.db.prepare(`DELETE FROM ${this.name};`).run();
+      this.db?.prepare(`DELETE FROM ${this.name};`).run();
     }
     super.clear();
   }
@@ -945,7 +867,7 @@ export class EnhancedMap<V> extends Map<string, V> {
       const data = this.get(key);
       if (isNil(_get(data, path)))
         throw new EnhancedMapPathError(
-          `The property "${path}" in key "${key}" does not exist. Please set() it or ensure() it."`,
+          `The property "${path}" in key "${key}" does not exist. Please set() it."`,
         );
       if (!types.includes(_get(data, path).constructor.name)) {
         throw new EnhancedMapKeyTypeError(
@@ -1053,7 +975,7 @@ export class EnhancedMap<V> extends Map<string, V> {
    * @param {*} data The data to clone.
    * @return {*} The cloned value.
    */
-  private _clone(data) {
+  private _clone<T>(data: T): T {
     if (this.cloneLevel === 'none') return data;
     if (this.cloneLevel === 'shallow') return clone(data);
     if (this.cloneLevel === 'deep') return cloneDeep(data);
@@ -1288,7 +1210,7 @@ export class EnhancedMap<V> extends Map<string, V> {
    * @param {Object} [thisArg] Value to use as `this` when executing function
    * @returns {Array}
    */
-  filterArray(fn, thisArg) {
+  filterArray(fn, thisArg: this) {
     this._readyCheck();
     if (thisArg) fn = fn.bind(thisArg);
     const results = [];
@@ -1304,7 +1226,7 @@ export class EnhancedMap<V> extends Map<string, V> {
    * @param {Function} fn Function that produces an element of the new array, taking three arguments
    * @param {*} [thisArg] Value to use as `this` when executing function
    */
-  map(fn, thisArg) {
+  map(fn, thisArg: this) {
     this._readyCheck();
     if (thisArg) fn = fn.bind(thisArg);
     const arr = new Array(this.size);
@@ -1319,7 +1241,7 @@ export class EnhancedMap<V> extends Map<string, V> {
    * @param {Function} fn Function used to test (should return a boolean)
    * @param {Object} [thisArg] Value to use as `this` when executing function
    */
-  some(fn, thisArg): boolean {
+  some(fn, thisArg: this): boolean {
     this._readyCheck();
     if (thisArg) fn = fn.bind(thisArg);
     for (const [key, val] of this) {
@@ -1334,7 +1256,7 @@ export class EnhancedMap<V> extends Map<string, V> {
    * @param {Function} fn Function used to test (should return a boolean)
    * @param {Object} [thisArg] Value to use as `this` when executing function
    */
-  every(fn, thisArg): boolean {
+  every(fn, thisArg: this): boolean {
     this._readyCheck();
     if (thisArg) fn = fn.bind(thisArg);
     for (const [key, val] of this) {
@@ -1369,28 +1291,5 @@ export class EnhancedMap<V> extends Map<string, V> {
       }
     }
     return accumulator;
-  }
-
-  /**
-   * Creates an identical shallow copy of this Enmap.
-   * @example const newColl = someColl.clone();
-   */
-  clone() {
-    this._readyCheck();
-    return new EnhancedMap(this);
-  }
-
-  /**
-   * Combines this Enmap with others into a new Enmap. None of the source Enmaps are modified.
-   * @param enmaps Enmaps to merge
-   * @example const newColl = someColl.concat(someOtherColl, anotherColl, ohBoyAColl);
-   */
-  concat(...enmaps: EnhancedMap<V>[]) {
-    this._readyCheck();
-    const newColl = this.clone();
-    for (const coll of enmaps) {
-      for (const [key, val] of coll) newColl.set(key, val);
-    }
-    return newColl;
   }
 }
