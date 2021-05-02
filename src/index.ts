@@ -33,6 +33,63 @@ import type { MathOps, Path, PathValue } from './types';
 // Package.json
 const pkgdata = require('../package.json');
 
+const escapeSQL = function(value: unknown) {
+  return '"' + String(value).replace(/"/g, '""') + '"';
+};
+
+/**
+ * Execute a mathematical operation.
+ * @param base the lefthand operand.
+ * @param op the operation.
+ * @param opand the righthand operand.
+ */
+const computeMathOperation = function(
+ base: number,
+ op: MathOps | 'rand' | 'random',
+ opand: number,
+) {
+ if (base == undefined || op == undefined || opand == undefined)
+   throw new EnhancedMapTypeError(
+     'Math Operation requires base and operation',
+   );
+ switch (op) {
+   case 'add':
+   case 'addition':
+   case '+':
+     return base + opand;
+   case 'sub':
+   case 'subtract':
+   case '-':
+     return base - opand;
+   case 'mult':
+   case 'multiply':
+   case '*':
+     return base * opand;
+   case 'div':
+   case 'divide':
+   case '/':
+     return base / opand;
+   case 'exp':
+   case 'exponent':
+   case '^':
+     return Math.pow(base, opand);
+   case 'mod':
+   case 'modulo':
+   case '%':
+     return base % opand;
+   case 'rand':
+   case 'random':
+     return Math.floor(Math.random() * Math.floor(opand));
+ }
+};
+
+/**
+ * Validate persistent enmap names (valid Windows filenames)
+ */
+const validateName = function(name: string): string {
+  return name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+};
+
 interface EnmapOptions<V> {
   name?: string;
   fetchAll?: boolean;
@@ -59,11 +116,11 @@ interface EnmapOptions<V> {
  * A enhanced Map structure with additional utility methods.
  * Can be made persistent.
  */
-export class EnhancedMap<V> extends Map<string, V> {
+export class EnhancedMap<V> {
   serializer: (data: V, key: string) => V;
   deserializer: (data: V, key: string) => V;
   name: string;
-  changedCB: any;
+  changedCB?: (key: string, oldValue: V | undefined, newValue: V | undefined) => void;
   inMemory: boolean;
   verbose?: boolean;
   default: V | {};
@@ -71,12 +128,13 @@ export class EnhancedMap<V> extends Map<string, V> {
   database?: SqliteDatabase;
   persistent: boolean;
   isDestroyed: boolean;
-  wal: any;
+  wal?: boolean;
   fetchAll?: boolean;
-  defer: any;
+  defer?: Promise<void>;
   autoFetch?: boolean;
   dataDir?: string;
   cloneLevel: string;
+  #map = new Map<string, V>();
 
   /**
    * Initializes a new enhanced map with options.
@@ -93,7 +151,6 @@ export class EnhancedMap<V> extends Map<string, V> {
       options = iterable || options;
       iterable = null;
     }
-    super();
 
     this.default = options.default ?? {};
     this.cloneLevel = 'deep';
@@ -124,7 +181,7 @@ export class EnhancedMap<V> extends Map<string, V> {
         ? new Database(':memory:', this.verbose ? { verbose: console.log } : ({}))
         : new Database(`${this.dataDir!}${sep}enmap.sqlite`, this.verbose ? { verbose: console.log } : ({}));
 
-      this._validateName();
+      this.name = validateName(this.name);
       this._init(this.database);
     }
 
@@ -172,7 +229,7 @@ export class EnhancedMap<V> extends Map<string, V> {
     }
     key = key.toString();
     let data = this.get(key);
-    const oldValue = super.has(key) ? this._clone(data) : null;
+    const oldValue = this.#map.has(key) ? this._clone(data) : null;
     if (!isNil(path)) {
       if (isNil(data)) data = {};
       _set(data, path, value);
@@ -183,7 +240,7 @@ export class EnhancedMap<V> extends Map<string, V> {
       this.changedCB(key, oldValue, data);
     }
     this._internalSet(key, data, false);
-    return super.set(key, this._clone(data));
+    return this.#map.set(key, this._clone(data));
   }
 
   /**
@@ -250,7 +307,7 @@ export class EnhancedMap<V> extends Map<string, V> {
     if (this.default && !this.has(key)) {
       this._internalSet(key, this.default);
     }
-    const data = super.get(key);
+    const data = this.#map.get(key);
     if (!isNil(path)) {
       this._check(key, ['Object', 'Array']);
       return _get(data, path);
@@ -280,8 +337,8 @@ export class EnhancedMap<V> extends Map<string, V> {
    */
   get count(): number {
     return this.db
-      ?.prepare(`SELECT count(*) FROM ${this._escapeSQL(this.name)}`)
-      .get().count;
+      ?.prepare(`SELECT count(*) FROM ${escapeSQL(this.name)}`)
+      .get().count as number;
   }
 
   /**
@@ -289,12 +346,10 @@ export class EnhancedMap<V> extends Map<string, V> {
    * @return Array of all indexes (keys) in the enmap, cached or not.
    */
   get indexes(): string[] {
-    return (
-      this.db
-        ?.prepare(`SELECT key FROM ${this._escapeSQL(this.name)};`)
-        .all()
-        ?.map((row) => row.key) ?? []
-    );
+    return this.db
+      ?.prepare(`SELECT key FROM ${escapeSQL(this.name)};`)
+      .all()
+      ?.map((row: { key: string }) => row.key) ?? [];
   }
 
   /**
@@ -304,12 +359,12 @@ export class EnhancedMap<V> extends Map<string, V> {
   fetchEverything() {
     this._readyCheck();
     const rows = this.db
-      ?.prepare(`SELECT * FROM ${this._escapeSQL(this.name)};`)
-      .all();
+      ?.prepare(`SELECT * FROM ${escapeSQL(this.name)};`)
+      .all() as { key: string, value: unknown }[];
     if (!rows) return this;
     for (const row of rows) {
       const val = this._parseData(row.value, row.key);
-      super.set(row.key, val);
+      this.#map.set(row.key, val);
     }
     return this;
   }
@@ -320,28 +375,28 @@ export class EnhancedMap<V> extends Map<string, V> {
    * @return The Enmap, including the new fetched values, or the value in case the function argument is a single key.
    */
   fetch(
-    keyOrKeys: string | number | Array<string | number>,
+    keyOrKeys: string | Array<string>,
   ): EnhancedMap<V> | V | null {
     this._readyCheck();
     if (Array.isArray(keyOrKeys)) {
       const data = this.db
         ?.prepare(
-          `SELECT * FROM ${this._escapeSQL(
+          `SELECT * FROM ${escapeSQL(
             this.name,
           )} WHERE key IN (${'?, '.repeat(keyOrKeys.length).slice(0, -2)})`,
         )
         .all(keyOrKeys);
       if (!data) return null;
       for (const row of data) {
-        super.set(row.key, this._parseData(row.value, row.key));
+        this.#map.set(row.key, this._parseData(row.value, row.key));
       }
       return this;
     } else {
       const data = this.db
-        ?.prepare(`SELECT * FROM ${this._escapeSQL(this.name)} WHERE key = ?;`)
+        ?.prepare(`SELECT * FROM ${escapeSQL(this.name)} WHERE key = ?;`)
         .get(keyOrKeys);
       if (!data) return null;
-      super.set(keyOrKeys, this._parseData(data.value, keyOrKeys));
+      this.#map.set(keyOrKeys, this._parseData(data.value, keyOrKeys));
       return this._parseData(data.value, keyOrKeys);
     }
   }
@@ -352,12 +407,12 @@ export class EnhancedMap<V> extends Map<string, V> {
    * @returns The enmap minus the evicted keys.
    */
   evict(
-    keyOrArrayOfKeys: string | number | Array<string | number>,
+    keyOrArrayOfKeys: string | Array<string>,
   ): EnhancedMap<V> {
     if (Array.isArray(keyOrArrayOfKeys)) {
-      keyOrArrayOfKeys.forEach((key) => super.delete(key));
+      keyOrArrayOfKeys.forEach((key) => this.#map.delete(key));
     } else {
-      super.delete(keyOrArrayOfKeys);
+      this.#map.delete(keyOrArrayOfKeys);
     }
     return this;
   }
@@ -389,6 +444,14 @@ export class EnhancedMap<V> extends Map<string, V> {
     return lastNum.toString();
   }
 
+  get size() {
+    return this.#map.size;
+  }
+
+  values() {
+    return this.#map.values();
+  }
+
   /**
    * Function called whenever data changes within Enmap after the initial load.
    * Can be used to detect if another part of your code changed a value in enmap and react on it.
@@ -414,12 +477,12 @@ export class EnhancedMap<V> extends Map<string, V> {
 
   /**
    * Push to an array value in Enmap.
-   * @param key Required. The key of the array element to push to in Enmap.
+   * @param key The key of the array element to push to in Enmap.
    * This value MUST be a string or number.
-   * @param {*} val Required. The value to push to the array.
-   * @param path Optional. The path to the property to modify inside the value object or array.
+   * @param val The value to push to the array.
+   * @param path The path to the property to modify inside the value object or array.
    * Can be a path with dot notation, such as "prop1.subprop2.subprop3"
-   * @param allowDupes Optional. Allow duplicate values in the array (default: false).
+   * @param allowDupes Allow duplicate values in the array (default: false).
    * @example
    * // Assuming
    * enmap.set("simpleArray", [1, 2, 3, 4]);
@@ -429,7 +492,7 @@ export class EnhancedMap<V> extends Map<string, V> {
    * enmap.push("arrayInObject", "five", "sub"); // adds "five" at the end of the sub array
    * @returns {EnhancedMap} The enmap.
    */
-  push(key: string, val, path?: string, allowDupes = false) {
+  push(key: string, val: any, path?: string, allowDupes = false): this {
     const data = this.get(key);
     this._check(key, 'Array', path);
     if (!isNil(path)) {
@@ -443,8 +506,6 @@ export class EnhancedMap<V> extends Map<string, V> {
     }
     return this._internalSet(key, data);
   }
-
-  // AWESOME MATHEMATICAL METHODS
 
   /**
    * Executes a mathematical operation on a value and saves it in the enmap.
@@ -463,10 +524,10 @@ export class EnhancedMap<V> extends Map<string, V> {
    * points.math("number", "modulo", 3); // 2
    * points.math("numberInObject", "+", 10, "sub.anInt");
    */
-  math(key: string, operation: MathOps, operand: number, path: keyof V) {
+  math(key: string, operation: MathOps, operand: number, path?: string): this {
     this._check(key, 'Number', path as string);
     const data = this.get(key, path);
-    const result = this._mathop(data, operation, operand);
+    const result = computeMathOperation(data, operation, operand);
     return this.set(key, result, path);
   }
 
@@ -482,7 +543,7 @@ export class EnhancedMap<V> extends Map<string, V> {
    * points.inc("number"); // 43
    * points.inc("numberInObject", "sub.anInt"); // {sub: { anInt: 6 }}
    */
-  inc(key: string, path: string): EnhancedMap<V>  {
+  inc(key: string, path?: string): EnhancedMap<V>  {
     this._check(key, 'Number', path);
     if (isNil(path)) {
       let val = this.get(key);
@@ -542,7 +603,7 @@ export class EnhancedMap<V> extends Map<string, V> {
       const data = this.get(key);
       return _has(data, path);
     }
-    return super.has(key);
+    return this.#map.has(key);
   }
 
   /**
@@ -610,9 +671,9 @@ export class EnhancedMap<V> extends Map<string, V> {
       }
       this.set(key, data);
     } else {
-      super.delete(key);
+      this.#map.delete(key);
       if (this.persistent) {
-        this.db.prepare(`DELETE FROM ${this.name} WHERE key = ?`).run(key);
+        this.db?.prepare(`DELETE FROM ${this.name} WHERE key = ?`).run(key);
         return this;
       }
       if (typeof this.changedCB === 'function') {
@@ -630,7 +691,7 @@ export class EnhancedMap<V> extends Map<string, V> {
     if (this.persistent) {
       this.db?.prepare(`DELETE FROM ${this.name};`).run();
     }
-    super.clear();
+    this.#map.clear();
   }
 
   /**
@@ -650,7 +711,7 @@ export class EnhancedMap<V> extends Map<string, V> {
 
     this.isDestroyed = true;
 
-    const transaction = this.db?.transaction((run) => {
+    const transaction = this.db!.transaction((run) => {
       for (const stmt of run) {
         this.db?.prepare(stmt).run();
       }
@@ -729,7 +790,7 @@ export class EnhancedMap<V> extends Map<string, V> {
     if (clear) this.deleteAll();
     if (isNil(data))
       throw new EnhancedMapImportError(
-        `No data provided for import() in ${this._escapeSQL(this.name)}`,
+        `No data provided for import() in ${escapeSQL(this.name)}`,
       );
     try {
       const parsed = eval(`(${data})`);
@@ -844,10 +905,6 @@ export class EnhancedMap<V> extends Map<string, V> {
     return this.defer;
   }
 
-  private _escapeSQL(value: unknown) {
-    return '"' + String(value).replace(/"/g, '""') + '"';
-  }
-
   /**
    * Verify the type of a key or property.
    * @param key The key of the element to check.
@@ -889,61 +946,6 @@ export class EnhancedMap<V> extends Map<string, V> {
   }
 
   /**
-   * INTERNAL method to execute a mathematical operation.
-   * @param {number} base the lefthand operand.
-   * @param {string} op the operation.
-   * @param {number} opand the righthand operand.
-   * @return {number} the result.
-   */
-  private _mathop(
-    base: number,
-    op: MathOps | 'rand' | 'random',
-    opand: number,
-  ) {
-    if (base == undefined || op == undefined || opand == undefined)
-      throw new EnhancedMapTypeError(
-        'Math Operation requires base and operation',
-      );
-    switch (op) {
-      case 'add':
-      case 'addition':
-      case '+':
-        return base + opand;
-      case 'sub':
-      case 'subtract':
-      case '-':
-        return base - opand;
-      case 'mult':
-      case 'multiply':
-      case '*':
-        return base * opand;
-      case 'div':
-      case 'divide':
-      case '/':
-        return base / opand;
-      case 'exp':
-      case 'exponent':
-      case '^':
-        return Math.pow(base, opand);
-      case 'mod':
-      case 'modulo':
-      case '%':
-        return base % opand;
-      case 'rand':
-      case 'random':
-        return Math.floor(Math.random() * Math.floor(opand));
-    }
-  }
-
-  /**
-   * Internal method used to validate persistent enmap names (valid Windows filenames)
-   * @private
-   */
-  private _validateName() {
-    this.name = this.name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-  }
-
-  /**
    * Verifies if a key needs to be fetched from the database.
    * If persistent enmap and autoFetch is on, retrieves the key.
    * @param {string} key The key to check or fetch.
@@ -955,7 +957,7 @@ export class EnhancedMap<V> extends Map<string, V> {
       this.fetch(key);
       return;
     }
-    if (super.has(key)) return;
+    if (this.#map.has(key)) return;
     if (!this.persistent || !this.autoFetch) return;
     this.fetch(key);
   }
@@ -1011,7 +1013,7 @@ export class EnhancedMap<V> extends Map<string, V> {
         )
         .run(key, serialized);
     }
-    if (updateCache) super.set(key, value);
+    if (updateCache) this.#map.set(key, value);
     return this;
   }
 
@@ -1031,7 +1033,7 @@ export class EnhancedMap<V> extends Map<string, V> {
    * use `Array.from(enmap.values())` instead.
    */
   array() {
-    return Array.from(this.values());
+    return Array.from(this.#map.values());
   }
 
   /**
@@ -1041,7 +1043,7 @@ export class EnhancedMap<V> extends Map<string, V> {
    * use `Array.from(enmap.keys())` instead.
    */
   keyArray() {
-    return Array.from(this.keys());
+    return Array.from(this.#map.keys());
   }
 
   /**
@@ -1089,16 +1091,12 @@ export class EnhancedMap<V> extends Map<string, V> {
    * @example
    * enmap.findAll('username', 'Bob');
    */
-  findAll(prop: string, value) {
+  findAll(prop: string, value: any): V[] {
     if (typeof prop !== 'string') throw new TypeError('Key must be a string.');
     if (isNil(value)) throw new EnhancedMapError('Value must be specified.');
     const results = [];
     for (const item of this.values()) {
-      if (
-        item[prop] === value ||
-        (isObject(item) && _get(item, prop) === value)
-      )
-        results.push(item);
+      if (item[prop as keyof V] === value || (isObject(item) && _get(item, prop) === value)) results.push(item);
     }
     return results;
   }
@@ -1110,7 +1108,7 @@ export class EnhancedMap<V> extends Map<string, V> {
    * <warn>All Enmap used in Discord.js are mapped using their `id` property, and if you want to find by id you
    * should use the `get` method. See
    * [MDN](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/get) for details.</warn>
-   * @param {string|Function} propOrFn The property to test against, or the function to test with
+   * @param propOrFn The property to test against, or the function to test with
    * @param {*} [value] The expected value - only applicable and required if using a property for the first argument
    * @returns {*}
    * @example
@@ -1118,17 +1116,19 @@ export class EnhancedMap<V> extends Map<string, V> {
    * @example
    * enmap.find(val => val.username === 'Bob');
    */
-  find(propOrFn, value) {
+  find(propOrFn: string, value: unknown): V | undefined;
+  find(propOrFn: (val: V, key: string, enamp: this) => boolean, value: unknown): V | undefined;
+  find(propOrFn: unknown, value: unknown): unknown {
     this._readyCheck();
     if (isNil(propOrFn) || (!isFunction(propOrFn) && isNil(value))) {
       throw new EnhancedMapArgumentError(
         'find requires either a prop and value, or a function. One of the provided arguments was null or undefined',
       );
     }
-    const func = isFunction(propOrFn)
+    const func = typeof propOrFn === 'function'
       ? propOrFn
-      : (v) => value === _get(v, propOrFn);
-    for (const [key, val] of this) {
+      : (v: V) => value === _get(v, propOrFn as string);
+    for (const [key, val] of this.#map) {
       if (func(val, key, this)) return val;
     }
     return null;
@@ -1140,26 +1140,27 @@ export class EnhancedMap<V> extends Map<string, V> {
    * [Array.findIndex()](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/findIndex).
    * @param {string|Function} propOrFn The property to test against, or the function to test with
    * @param {*} [value] The expected value - only applicable and required if using a property for the first argument
-   * @returns {string|number}
    * @example
    * enmap.findKey('username', 'Bob');
    * @example
    * enmap.findKey(val => val.username === 'Bob');
    */
-  findKey(propOrFn, value) {
+  findKey(propOrFn: string, value: unknown): string | null;
+  findKey(propOrFn: (val: V, key: string, enmap: this) => boolean, value: unknown): string | null;
+  findKey(propOrFn: unknown, value: unknown) {
     this._readyCheck();
     if (typeof propOrFn === 'string') {
       if (isNil(value)) throw new EnhancedMapError('Value must be specified.');
-      for (const [key, val] of this) {
+      for (const [key, val] of this.#map) {
         if (
-          val[propOrFn] === value ||
+          val[propOrFn as keyof V] === value ||
           (isObject(val) && _get(val, propOrFn) === value)
         )
-          return key;
+        return key;
       }
       return null;
     } else if (typeof propOrFn === 'function') {
-      for (const [key, val] of this) {
+      for (const [key, val] of this.#map) {
         if (propOrFn(val, key, this)) return key;
       }
       return null;
@@ -1173,13 +1174,13 @@ export class EnhancedMap<V> extends Map<string, V> {
    * Removes entries that satisfy the provided filter function.
    * @param {Function} fn Function used to test (should return a boolean)
    * @param {Object} [thisArg] Value to use as `this` when executing function
-   * @returns {number} The number of removed entries
+   * @returns The number of removed entries
    */
-  sweep(fn, thisArg) {
+  sweep(fn: (val: V, key: string, enmap: this) => boolean, thisArg?: any): number {
     this._readyCheck();
     if (thisArg) fn = fn.bind(thisArg);
     const previousSize = this.size;
-    for (const [key, val] of this) {
+    for (const [key, val] of this.#map) {
       if (fn(val, key, this)) this.delete(key);
     }
     return previousSize - this.size;
@@ -1193,11 +1194,11 @@ export class EnhancedMap<V> extends Map<string, V> {
    * @param {Object} [thisArg] Value to use as `this` when executing function
    * @returns {EnhancedMap}
    */
-  filter(fn, thisArg) {
+  filter(fn: (val: V, key: string, enmap: this) => boolean, thisArg?: any): EnhancedMap<V> {
     this._readyCheck();
     if (thisArg) fn = fn.bind(thisArg);
-    const results = new EnhancedMap(this.name);
-    for (const [key, val] of this) {
+    const results = new EnhancedMap<V>(this.name);
+    for (const [key, val] of this.#map) {
       if (fn(val, key, this)) results.set(key, val);
     }
     return results;
@@ -1210,11 +1211,11 @@ export class EnhancedMap<V> extends Map<string, V> {
    * @param {Object} [thisArg] Value to use as `this` when executing function
    * @returns {Array}
    */
-  filterArray(fn, thisArg: this) {
+  filterArray(fn: (val: V, key: string, enmap: this) => boolean, thisArg?: any): V[] {
     this._readyCheck();
     if (thisArg) fn = fn.bind(thisArg);
     const results = [];
-    for (const [key, val] of this) {
+    for (const [key, val] of this.#map) {
       if (fn(val, key, this)) results.push(val);
     }
     return results;
@@ -1226,12 +1227,12 @@ export class EnhancedMap<V> extends Map<string, V> {
    * @param {Function} fn Function that produces an element of the new array, taking three arguments
    * @param {*} [thisArg] Value to use as `this` when executing function
    */
-  map(fn, thisArg: this) {
+  map<R>(fn: (val: V, key: string, enmap: this) => R, thisArg?: any): R[] {
     this._readyCheck();
     if (thisArg) fn = fn.bind(thisArg);
     const arr = new Array(this.size);
     let i = 0;
-    for (const [key, val] of this) arr[i++] = fn(val, key, this);
+    for (const [key, val] of this.#map) arr[i++] = fn(val, key, this);
     return arr;
   }
 
@@ -1241,10 +1242,10 @@ export class EnhancedMap<V> extends Map<string, V> {
    * @param {Function} fn Function used to test (should return a boolean)
    * @param {Object} [thisArg] Value to use as `this` when executing function
    */
-  some(fn, thisArg: this): boolean {
+  some(fn: (val: V, key: string, enmap: this) => boolean, thisArg?: any): boolean {
     this._readyCheck();
     if (thisArg) fn = fn.bind(thisArg);
-    for (const [key, val] of this) {
+    for (const [key, val] of this.#map) {
       if (fn(val, key, this)) return true;
     }
     return false;
@@ -1256,10 +1257,10 @@ export class EnhancedMap<V> extends Map<string, V> {
    * @param {Function} fn Function used to test (should return a boolean)
    * @param {Object} [thisArg] Value to use as `this` when executing function
    */
-  every(fn, thisArg: this): boolean {
+  every(fn: (val: V, key: string, enmap: this) => boolean, thisArg?: any): boolean {
     this._readyCheck();
     if (thisArg) fn = fn.bind(thisArg);
-    for (const [key, val] of this) {
+    for (const [key, val] of this.#map) {
       if (!fn(val, key, this)) return false;
     }
     return true;
@@ -1272,16 +1273,17 @@ export class EnhancedMap<V> extends Map<string, V> {
    * and `enmap`
    * @param {*} [initialValue] Starting value for the accumulator
    */
-  reduce(fn, initialValue) {
+  reduce(fn: (acc: V, val: V, key: string, enmap: this) => V, initialValue?: V): V;
+  reduce<R>(fn: (acc: R, val: V, key: string, enmap: this) => V, initialValue: R): R {
     this._readyCheck();
     let accumulator;
     if (typeof initialValue !== 'undefined') {
       accumulator = initialValue;
-      for (const [key, val] of this)
+      for (const [key, val] of this.#map)
         accumulator = fn(accumulator, val, key, this);
     } else {
       let first = true;
-      for (const [key, val] of this) {
+      for (const [key, val] of this.#map) {
         if (first) {
           accumulator = val;
           first = false;
